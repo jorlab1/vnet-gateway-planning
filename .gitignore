@@ -1,0 +1,19 @@
+# Generated inventory and analysis data
+output/
+input/
+
+# Local configuration and capacity mappings
+config/estate-config.psd1
+config/capacity-environment-map.csv
+
+# Credentials and local environment files
+.env
+*.pem
+*.pfx
+*.p12
+*.key
+
+# PowerShell and editor artifacts
+*.user
+.vscode/
+.idea/
