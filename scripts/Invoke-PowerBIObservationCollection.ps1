@@ -23,7 +23,7 @@ $historicalCollection = if ($configuration.HistoricalCollection) {
 $outputPath = $configuration.OutputPath
 if (-not [IO.Path]::IsPathRooted($outputPath)) { $outputPath = Join-Path $root $outputPath }
 $modelPath = Join-Path $outputPath 'semantic-models.csv'
-if (-not (Test-Path $modelPath)) { throw "Run Invoke-PowerBIEstateInventory.ps1 first; missing $modelPath." }
+if (-not (Test-Path $modelPath)) { throw "Run Invoke-GatewayPlanningCollection.ps1 first; missing $modelPath." }
 
 Connect-EstateIdentity -Configuration $configuration
 $token = Get-EstateAccessToken -Resource PowerBI
