@@ -8,18 +8,17 @@ Licensed under the [MIT License](LICENSE).
 
 ## Quick start
 
-1. Authorize a service principal for the read-only admin APIs — see [Service principal setup](#service-principal-setup). This is a one-time tenant admin task.
-2. Make the tenant ID, client ID, and secret available — see [Credentials](#credentials).
-3. Confirm access:
+1. Choose how to authenticate — see [Authentication](#authentication). The quickest option, if you are already a Fabric administrator with the Azure CLI installed:
 
    ```powershell
-   pwsh .\scripts\Invoke-FabricTenantInventory.ps1 -TestConnectionOnly
+   az login
+   pwsh .\scripts\Invoke-FabricTenantInventory.ps1 -AuthMode AzureCli -TestConnectionOnly
    ```
 
-4. Retrieve the inventory:
+2. Retrieve the inventory:
 
    ```powershell
-   pwsh .\scripts\Invoke-FabricTenantInventory.ps1
+   pwsh .\scripts\Invoke-FabricTenantInventory.ps1 -AuthMode AzureCli
    ```
 
 The CSV is written to `output\powerbi-inventory.csv` and its full path is printed at the end of the run. Use `-OutputPath` to send it elsewhere. The `output` folder is gitignored.
@@ -53,11 +52,48 @@ Behavior:
 ## Prerequisites
 
 - PowerShell 7
-- A Microsoft Entra service principal authorized for Power BI read-only admin APIs
+- Either a Fabric administrator account, or a service principal authorized for Power BI read-only admin APIs
+- The Azure CLI, only if you use `-AuthMode AzureCli`
 
-No Azure CLI, no module installation, and no configuration file are required for the inventory.
+No module installation and no configuration file are required.
 
-### Service principal setup
+## Authentication
+
+Pick a mode with `-AuthMode`, or set `POWERBI_AUTH_MODE` as an environment variable or in `.env` so repeat runs need no arguments.
+
+| Mode | Who it signs in | Secret needed | Best for |
+|---|---|---|---|
+| `AzureCli` | The current `az login` user | No | Ad-hoc runs by an admin who already uses the Azure CLI |
+| `DeviceCode` | An interactive user, via a browser code | No | Ad-hoc runs on a machine without the Azure CLI |
+| `ServicePrincipal` (default) | An app registration | Yes | Unattended and scheduled runs |
+
+Both user modes require the signed-in account to hold the **Fabric Administrator** (or Power BI Administrator) role. That role is what grants tenant-wide access; workspace Member or Admin access is not sufficient in any mode.
+
+### AzureCli
+
+```powershell
+az login
+pwsh .\scripts\Invoke-FabricTenantInventory.ps1 -AuthMode AzureCli
+```
+
+The token is requested for the Power BI resource and used only in memory. Add `-TenantId` if your account spans multiple tenants.
+
+### DeviceCode
+
+```powershell
+pwsh .\scripts\Invoke-FabricTenantInventory.ps1 -AuthMode DeviceCode `
+  -TenantId 00000000-0000-0000-0000-000000000000
+```
+
+The script prints a URL and a code, waits for you to sign in, then continues. Sign-in waits up to 5 minutes; change that with `-SignInTimeoutSeconds`.
+
+By default this uses the Azure CLI public client, which is already authorized for the Power BI audience, so no app registration is needed. To use your own public client instead, pass `-ClientId` and grant it the delegated `Tenant.Read.All` Power BI permission.
+
+### ServicePrincipal
+
+This is the default mode and the one to use for scheduled runs. It requires the setup and credentials described below.
+
+#### Service principal setup
 
 1. Create (or reuse) an Entra app registration and note its Application (client) ID.
 2. Confirm the app has **no** admin-consent-required Power BI application permissions. Authorization comes from the tenant setting below, not from API permissions.
@@ -69,12 +105,13 @@ No Azure CLI, no module installation, and no configuration file are required for
 
 Workspace-level Member or Admin access is **not** sufficient. These are tenant-wide endpoints; the security-group allowlist is what grants access. If the service principal isn't authorized, the run fails immediately and lists the missing prerequisites.
 
-## Credentials
+#### Credentials
 
-The inventory needs a tenant ID, a client ID, and a client secret. Each is resolved from the first source that supplies it:
+Every setting resolves from the first source that supplies it:
 
 | Value | Resolution order |
 |---|---|
+| Auth mode | `-AuthMode` parameter → `POWERBI_AUTH_MODE` process variable → `.env` → defaults to `ServicePrincipal` |
 | Tenant ID | `-TenantId` parameter → `POWERBI_TENANT_ID` process variable → `.env` |
 | Client ID | `-ClientId` parameter → `POWERBI_CLIENT_ID` process variable → `.env` |
 | Secret variable *name* | `-ClientSecretEnvironmentVariable` → `POWERBI_CLIENT_SECRET_VARIABLE` → `.env` → defaults to `POWERBI_CLIENT_SECRET` |
@@ -84,7 +121,7 @@ Only the *name* of the secret variable is ever passed on the command line or sto
 
 Because the secret also falls back to the Windows user scope, a variable set through **System Properties → Environment Variables** works even in a shell that started before it was created.
 
-### Option A: existing environment variables (no file)
+##### Option A: existing environment variables (no file)
 
 ```powershell
 pwsh .\scripts\Invoke-FabricTenantInventory.ps1 `
@@ -93,7 +130,7 @@ pwsh .\scripts\Invoke-FabricTenantInventory.ps1 `
   -ClientSecretEnvironmentVariable FABRIC_TEST_SP_SECRET
 ```
 
-### Option B: a .env file
+##### Option B: a .env file
 
 Copy `.env.example` to `.env` and fill it in. To keep the secret out of the file entirely, point `.env` at the variable that already holds it:
 
@@ -116,6 +153,7 @@ The secret is only ever sent in the encoded token request body. It is never logg
 ## Run
 
 Verify access without scanning anything:
+
 ```powershell
 pwsh .\scripts\Invoke-FabricTenantInventory.ps1 -TestConnectionOnly
 ```
@@ -130,7 +168,9 @@ Useful parameters:
 
 | Parameter | Default | Purpose |
 |---|---|---|
+| `-AuthMode` | `ServicePrincipal` | `ServicePrincipal`, `DeviceCode`, or `AzureCli` |
 | `-ClientSecretEnvironmentVariable` | `POWERBI_CLIENT_SECRET` | Name of the variable holding the secret |
+| `-SignInTimeoutSeconds` | `300` | How long device code sign-in waits |
 | `-OutputPath` | `output\powerbi-inventory.csv` | Destination CSV |
 | `-EnvironmentFilePath` | `.env` in the repo root | Alternate credential file |
 | `-WorkspaceBatchSize` | `100` | Workspaces per scan request (API maximum is 100) |
@@ -141,14 +181,15 @@ Add `-Verbose` to see per-batch scan progress on large tenants.
 
 ## Repeat runs
 
-The command is safe to re-run at any time. It is read-only, takes no configuration file, and fully replaces the output CSV on success. To schedule it, point a task at the same command line and supply the three values from the scheduler's secret store.
+The command is safe to re-run at any time. It is read-only, takes no configuration file, and fully replaces the output CSV on success. To schedule it, use `ServicePrincipal` mode and supply the three values from the scheduler's secret store — the user modes are interactive and are not suitable for automation.
 
 Throttling limits worth knowing for large tenants: 200 capacity requests/hour, 500 scan requests/hour, and 100 workspaces per scan request. The client honors `Retry-After`, retries transient failures with jitter, and warns when a run needs an unusually large number of batches.
 
 ## Failure behavior
 
 - Missing credentials fail before any API call, naming the variable that wasn't found.
-- An authorization failure explains the tenant settings and security-group requirement.
+- An authorization failure explains what the caller is missing: the tenant settings and security group for a service principal, or the Fabric Administrator role for a signed-in user.
+- Device code sign-in fails cleanly if it is declined, expires, or is not completed within `-SignInTimeoutSeconds`.
 - If any workspace scan batch fails — including when a workspace's capacity is unavailable — the run aborts, names the affected workspaces, and leaves the previous CSV untouched.
 - If duplicate model names in one workspace can't be ordered because creation timestamps are missing or invalid, the run fails rather than guessing.
 

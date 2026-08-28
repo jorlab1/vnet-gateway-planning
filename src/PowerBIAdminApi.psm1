@@ -45,9 +45,15 @@ function Invoke-InventoryAdminRequest {
             return Invoke-RestMethod @parameters
         }
         catch {
-            $response = $_.Exception.Response
+            # A transport-level failure raises an exception without a Response
+            # property, which strict mode would otherwise turn into a confusing
+            # secondary error inside the handler.
+            $response = if ($_.Exception.PSObject.Properties['Response']) { $_.Exception.Response } else { $null }
             $statusCode = if ($response) { [int]$response.StatusCode } else { 0 }
             $isRetryable = $statusCode -in 429, 500, 502, 503, 504
+
+            # Transport failures have no status code but are usually transient.
+            if ($statusCode -eq 0 -and $_.Exception -is [Net.Http.HttpRequestException]) { $isRetryable = $true }
 
             if ($attempt -eq $MaximumAttempts -or -not $isRetryable) {
                 $requestId = Get-ResponseHeaderValue -Response $response -Name 'RequestId'
@@ -55,8 +61,8 @@ function Invoke-InventoryAdminRequest {
                     $requestId = Get-ResponseHeaderValue -Response $response -Name 'x-ms-request-id'
                 }
                 $hint = switch ($statusCode) {
-                    401 { ' The token was rejected. Confirm the Power BI token audience and that the service principal is allowed to call read-only admin APIs.' }
-                    403 { ' Access was denied. Confirm the service principal is in the security group allowed by the Fabric admin API tenant settings.' }
+                    401 { ' The token was rejected. Confirm the Power BI token audience and that the caller is authorized for read-only admin APIs.' }
+                    403 { ' Access was denied. A service principal must be in a security group allowed by the Fabric admin API tenant settings; a user must hold the Fabric Administrator role.' }
                     default { '' }
                 }
                 throw "Admin API $Method $Uri failed with status $statusCode. RequestId=$requestId.$hint $($_.Exception.Message)"

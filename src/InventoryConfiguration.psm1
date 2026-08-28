@@ -1,6 +1,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$script:AuthModes = @('ServicePrincipal', 'DeviceCode', 'AzureCli')
+
+# Azure CLI's well-known public client, pre-authorized for the Power BI audience.
+$script:DefaultPublicClientId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
+
 function Import-InventoryEnvironmentFile {
     <#
         .SYNOPSIS
@@ -107,35 +112,73 @@ function Resolve-InventorySecret {
 function Get-InventoryCredential {
     <#
         .SYNOPSIS
-        Builds the full service-principal credential set for the inventory run.
+        Builds the credential set for the inventory run.
+
+        .DESCRIPTION
+        ServicePrincipal mode needs a tenant, client, and secret. The user-based
+        modes need no secret: DeviceCode signs a Fabric administrator in against
+        a public client, and AzureCli reuses an existing 'az login'.
     #>
     [CmdletBinding()]
     param(
         [AllowEmptyString()][string]$TenantId,
         [AllowEmptyString()][string]$ClientId,
         [AllowEmptyString()][string]$ClientSecretEnvironmentVariable = '',
-        [AllowEmptyString()][string]$EnvironmentFilePath
+        [AllowEmptyString()][string]$EnvironmentFilePath,
+        [AllowEmptyString()][string]$AuthMode = ''
     )
 
     $fileValues = Import-InventoryEnvironmentFile -Path $EnvironmentFilePath
-    $tenant = Resolve-InventorySetting -ExplicitValue $TenantId -VariableName 'POWERBI_TENANT_ID' -FileValues $fileValues -Required
-    $client = Resolve-InventorySetting -ExplicitValue $ClientId -VariableName 'POWERBI_CLIENT_ID' -FileValues $fileValues -Required
 
-    # The name of the secret variable is itself configurable, so a repeat run
-    # needs no arguments even when the secret lives under a custom name.
-    $secretVariable = Resolve-InventorySetting -ExplicitValue $ClientSecretEnvironmentVariable `
-        -VariableName 'POWERBI_CLIENT_SECRET_VARIABLE' -FileValues $fileValues
-    $secretVariableName = if ($secretVariable.Value) { $secretVariable.Value } else { 'POWERBI_CLIENT_SECRET' }
+    $modeSetting = Resolve-InventorySetting -ExplicitValue $AuthMode -VariableName 'POWERBI_AUTH_MODE' -FileValues $fileValues
+    $mode = if ($modeSetting.Value) { $modeSetting.Value } else { 'ServicePrincipal' }
+    $match = $script:AuthModes | Where-Object { $_ -eq $mode }
+    if (-not $match) {
+        throw "Unknown authentication mode '$mode'. Valid values are $($script:AuthModes -join ', ')."
+    }
+    $mode = $match
 
-    $secret = Resolve-InventorySecret -VariableName $secretVariableName -FileValues $fileValues
+    # Azure CLI supplies its own tenant context, so nothing else is required.
+    $tenantRequired = $mode -ne 'AzureCli'
+    $tenant = Resolve-InventorySetting -ExplicitValue $TenantId -VariableName 'POWERBI_TENANT_ID' `
+        -FileValues $fileValues -Required:$tenantRequired
+
+    $client = Resolve-InventorySetting -ExplicitValue $ClientId -VariableName 'POWERBI_CLIENT_ID' `
+        -FileValues $fileValues -Required:($mode -eq 'ServicePrincipal')
+
+    $clientId = $client.Value
+    $clientIdSource = $client.Source
+    if ($mode -eq 'DeviceCode' -and -not $clientId) {
+        # The Azure CLI public client is pre-authorized for the Power BI audience,
+        # so device code sign-in works without registering an application.
+        $clientId = $script:DefaultPublicClientId
+        $clientIdSource = 'DefaultPublicClient'
+    }
+
+    $secretVariableName = ''
+    $secretValue = ''
+    $secretSource = 'NotRequired'
+    if ($mode -eq 'ServicePrincipal') {
+        # The name of the secret variable is itself configurable, so a repeat run
+        # needs no arguments even when the secret lives under a custom name.
+        $secretVariable = Resolve-InventorySetting -ExplicitValue $ClientSecretEnvironmentVariable `
+            -VariableName 'POWERBI_CLIENT_SECRET_VARIABLE' -FileValues $fileValues
+        $secretVariableName = if ($secretVariable.Value) { $secretVariable.Value } else { 'POWERBI_CLIENT_SECRET' }
+
+        $secret = Resolve-InventorySecret -VariableName $secretVariableName -FileValues $fileValues
+        $secretValue = $secret.Value
+        $secretSource = $secret.Source
+    }
 
     return [pscustomobject]@{
+        AuthMode = $mode
+        AuthModeSource = if ($modeSetting.Value) { $modeSetting.Source } else { 'Default' }
         TenantId = $tenant.Value
         TenantIdSource = $tenant.Source
-        ClientId = $client.Value
-        ClientIdSource = $client.Source
-        ClientSecret = $secret.Value
-        ClientSecretSource = $secret.Source
+        ClientId = $clientId
+        ClientIdSource = $clientIdSource
+        ClientSecret = $secretValue
+        ClientSecretSource = $secretSource
         ClientSecretVariableName = $secretVariableName
     }
 }
