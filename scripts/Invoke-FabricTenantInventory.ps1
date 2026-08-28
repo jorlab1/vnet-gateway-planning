@@ -3,17 +3,29 @@
     Inventories Power BI/Fabric capacities, workspaces, and semantic models into one CSV.
 
     .DESCRIPTION
-    Runs read-only Power BI admin APIs as a service principal and writes a single
-    CSV with these columns:
+    Runs read-only Power BI admin APIs and writes a single CSV with these columns:
 
         CapacityName,CapacityId,WorkspaceName,WorkspaceId,SemanticModelName,SemanticModelCreatedAt,TargetStorageMode
 
-    Credentials resolve from parameters, then process environment variables, then
-    an optional .env file. The client secret additionally falls back to the Windows
+    Three authentication modes are supported:
+
+        ServicePrincipal  Client credentials. Unattended; the default.
+        DeviceCode        Interactive sign-in as a Fabric administrator. No secret.
+        AzureCli          Reuses an existing 'az login'. No secret.
+
+    Settings resolve from parameters, then process environment variables, then an
+    optional .env file. The client secret additionally falls back to the Windows
     user-scoped environment variable, so no .env file is required.
 
     .EXAMPLE
     pwsh .\scripts\Invoke-FabricTenantInventory.ps1
+
+    .EXAMPLE
+    pwsh .\scripts\Invoke-FabricTenantInventory.ps1 -AuthMode AzureCli
+
+    .EXAMPLE
+    pwsh .\scripts\Invoke-FabricTenantInventory.ps1 -AuthMode DeviceCode `
+        -TenantId 00000000-0000-0000-0000-000000000000
 
     .EXAMPLE
     pwsh .\scripts\Invoke-FabricTenantInventory.ps1 `
@@ -23,6 +35,7 @@
 #>
 [CmdletBinding()]
 param(
+    [ValidateSet('', 'ServicePrincipal', 'DeviceCode', 'AzureCli')][string]$AuthMode = '',
     [string]$TenantId = '',
     [string]$ClientId = '',
     [string]$ClientSecretEnvironmentVariable = '',
@@ -30,6 +43,7 @@ param(
     [string]$OutputPath = '',
     [int]$WorkspaceBatchSize = 100,
     [int]$PollSeconds = 2,
+    [int]$SignInTimeoutSeconds = 300,
     [switch]$TestConnectionOnly
 )
 
@@ -46,22 +60,27 @@ elseif (-not [IO.Path]::IsPathRooted($OutputPath)) { $OutputPath = Join-Path $ro
 
 $started = [datetime]::UtcNow
 
-$credential = Get-InventoryCredential -TenantId $TenantId -ClientId $ClientId `
+$credential = Get-InventoryCredential -AuthMode $AuthMode -TenantId $TenantId -ClientId $ClientId `
     -ClientSecretEnvironmentVariable $ClientSecretEnvironmentVariable -EnvironmentFilePath $EnvironmentFilePath
 
-Write-Host "Tenant $($credential.TenantId) (from $($credential.TenantIdSource))"
-Write-Host "Client $($credential.ClientId) (from $($credential.ClientIdSource))"
-Write-Host "Secret variable $($credential.ClientSecretVariableName) (from $($credential.ClientSecretSource))"
+Write-Host "Auth mode $($credential.AuthMode) (from $($credential.AuthModeSource))"
+if ($credential.TenantId) { Write-Host "Tenant $($credential.TenantId) (from $($credential.TenantIdSource))" }
+if ($credential.ClientId) { Write-Host "Client $($credential.ClientId) (from $($credential.ClientIdSource))" }
+if ($credential.AuthMode -eq 'ServicePrincipal') {
+    Write-Host "Secret variable $($credential.ClientSecretVariableName) (from $($credential.ClientSecretSource))"
+}
 
-$token = Get-InventoryAccessToken -TenantId $credential.TenantId -ClientId $credential.ClientId -ClientSecret $credential.ClientSecret
+$token = Get-InventoryToken -AuthMode $credential.AuthMode -TenantId $credential.TenantId `
+    -ClientId $credential.ClientId -ClientSecret $credential.ClientSecret -TimeoutSeconds $SignInTimeoutSeconds
 
 # Preflight: capacities is the cheapest admin call and fails fast when the
-# service principal is not authorized for tenant-wide read-only admin APIs.
+# caller is not authorized for tenant-wide read-only admin APIs.
 try {
     $capacities = @(Get-InventoryCapacity -AccessToken $token)
 }
 catch {
-    throw @"
+    if ($credential.AuthMode -eq 'ServicePrincipal') {
+        throw @"
 Tenant admin access check failed.
 
 $($_.Exception.Message)
@@ -72,6 +91,18 @@ Workspace-level Member or Admin access is not sufficient. The service principal 
   2. Covered by 'Enhanced admin APIs for workspace and content scanning' for the
      workspace scanner endpoints.
   3. Free of admin-consent-required Power BI application permissions.
+"@
+    }
+
+    throw @"
+Tenant admin access check failed.
+
+$($_.Exception.Message)
+
+The signed-in user must hold the Fabric Administrator (or Power BI Administrator)
+role. Workspace-level Member or Admin access is not sufficient. If sign-in itself
+succeeded, confirm the role assignment and that the token was issued for the
+correct tenant.
 "@
 }
 
@@ -84,7 +115,7 @@ if ($TestConnectionOnly) {
 $workspaces = @(Get-InventoryWorkspace -AccessToken $token)
 Write-Host "Active non-personal workspaces: $($workspaces.Count)"
 if ($workspaces.Count -eq 0) {
-    throw 'No active workspaces were returned. Verify the service principal is allowed to call the read-only admin APIs.'
+    throw 'No active workspaces were returned. Verify the caller is authorized for the read-only admin APIs.'
 }
 
 $scanResults = @(Invoke-InventoryWorkspaceScan -Workspaces $workspaces -AccessToken $token `

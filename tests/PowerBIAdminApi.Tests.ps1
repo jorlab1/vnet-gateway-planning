@@ -86,3 +86,35 @@ Describe 'Workspace discovery' {
         Assert-MockCalled -ModuleName PowerBIAdminApi Invoke-InventoryAdminRequest -Times 2 -Exactly
     }
 }
+
+Describe 'Transport failure handling' {
+    It 'retries a transport failure and succeeds on a later attempt' {
+        $global:AttemptLog = [System.Collections.ArrayList]::new()
+        Mock -ModuleName PowerBIAdminApi Start-Sleep {}
+        Mock -ModuleName PowerBIAdminApi Invoke-RestMethod {
+            # An exception with no Response property, like a dropped connection.
+            if ($global:AttemptLog.Count -lt 1) {
+                [void]$global:AttemptLog.Add(1)
+                throw [Net.Http.HttpRequestException]::new('The connection was closed.')
+            }
+            return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'c1' }) }
+        }
+
+        $capacities = @(Get-InventoryCapacity -AccessToken 'token')
+        if ($capacities.Count -ne 1) { throw 'The call should have succeeded after a retry.' }
+    }
+
+    It 'reports a transport failure clearly once retries are exhausted' {
+        Mock -ModuleName PowerBIAdminApi Start-Sleep {}
+        Mock -ModuleName PowerBIAdminApi Invoke-RestMethod {
+            throw [Net.Http.HttpRequestException]::new('The connection was closed.')
+        }
+
+        $message = ''
+        try { Get-InventoryCapacity -AccessToken 'token' } catch { $message = $_.Exception.Message }
+        if ($message -notlike '*The connection was closed*') {
+            throw "The underlying transport error should be surfaced, got: $message"
+        }
+        if ($message -like "*'Response'*") { throw 'The handler leaked a strict-mode property error.' }
+    }
+}

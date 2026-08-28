@@ -150,3 +150,79 @@ Describe 'Secret resolution' {
         }
     }
 }
+
+Describe 'Authentication mode selection' {
+    It 'defaults to service principal when no mode is configured' {
+        [Environment]::SetEnvironmentVariable('POWERBI_TENANT_ID', 'tenant-a')
+        [Environment]::SetEnvironmentVariable('POWERBI_CLIENT_ID', 'client-a')
+        [Environment]::SetEnvironmentVariable('POWERBI_CLIENT_SECRET', 'secret-a')
+        try {
+            $credential = Get-InventoryCredential -EnvironmentFilePath (Join-Path $TestDrive 'absent.env')
+            if ($credential.AuthMode -ne 'ServicePrincipal') { throw "Expected ServicePrincipal, got $($credential.AuthMode)." }
+            if ($credential.AuthModeSource -ne 'Default') { throw 'Mode source should report the default.' }
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('POWERBI_TENANT_ID', $null)
+            [Environment]::SetEnvironmentVariable('POWERBI_CLIENT_ID', $null)
+            [Environment]::SetEnvironmentVariable('POWERBI_CLIENT_SECRET', $null)
+        }
+    }
+
+    It 'reads the mode from the .env file so no argument is needed' {
+        $path = Join-Path $TestDrive 'mode.env'
+        @('POWERBI_AUTH_MODE=AzureCli') | Set-Content -LiteralPath $path
+        $credential = Get-InventoryCredential -EnvironmentFilePath $path
+        if ($credential.AuthMode -ne 'AzureCli') { throw "Expected AzureCli, got $($credential.AuthMode)." }
+        if ($credential.AuthModeSource -ne 'EnvironmentFile') { throw 'Mode source should be the .env file.' }
+    }
+
+    It 'accepts the mode case-insensitively and normalizes it' {
+        $credential = Get-InventoryCredential -AuthMode 'azurecli' -EnvironmentFilePath (Join-Path $TestDrive 'absent.env')
+        if ($credential.AuthMode -ne 'AzureCli') { throw "Mode was not normalized, got $($credential.AuthMode)." }
+    }
+
+    It 'rejects an unknown mode' {
+        $threw = $false
+        try { Get-InventoryCredential -AuthMode 'Certificate' -EnvironmentFilePath (Join-Path $TestDrive 'absent.env') }
+        catch { $threw = $true }
+        if (-not $threw) { throw 'An unknown authentication mode should fail.' }
+    }
+
+    It 'requires no secret and no client for Azure CLI mode' {
+        $credential = Get-InventoryCredential -AuthMode 'AzureCli' -EnvironmentFilePath (Join-Path $TestDrive 'absent.env')
+        if ($credential.ClientSecret) { throw 'Azure CLI mode must not resolve a secret.' }
+        if ($credential.ClientSecretSource -ne 'NotRequired') { throw 'Secret source should report NotRequired.' }
+        if ($credential.TenantId) { throw 'Azure CLI mode should not demand a tenant.' }
+    }
+
+    It 'falls back to the Azure CLI public client for device code sign-in' {
+        [Environment]::SetEnvironmentVariable('POWERBI_TENANT_ID', 'tenant-b')
+        try {
+            $credential = Get-InventoryCredential -AuthMode 'DeviceCode' -EnvironmentFilePath (Join-Path $TestDrive 'absent.env')
+            if ($credential.ClientId -ne '04b07795-8ddb-461a-bbee-02f9e1bf7b46') { throw "Unexpected default client $($credential.ClientId)." }
+            if ($credential.ClientIdSource -ne 'DefaultPublicClient') { throw 'Client source should report the default public client.' }
+            if ($credential.ClientSecret) { throw 'Device code mode must not resolve a secret.' }
+        }
+        finally { [Environment]::SetEnvironmentVariable('POWERBI_TENANT_ID', $null) }
+    }
+
+    It 'prefers an explicitly configured client over the default public client' {
+        [Environment]::SetEnvironmentVariable('POWERBI_TENANT_ID', 'tenant-c')
+        [Environment]::SetEnvironmentVariable('POWERBI_CLIENT_ID', 'my-public-client')
+        try {
+            $credential = Get-InventoryCredential -AuthMode 'DeviceCode' -EnvironmentFilePath (Join-Path $TestDrive 'absent.env')
+            if ($credential.ClientId -ne 'my-public-client') { throw 'A configured client ID should win.' }
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('POWERBI_TENANT_ID', $null)
+            [Environment]::SetEnvironmentVariable('POWERBI_CLIENT_ID', $null)
+        }
+    }
+
+    It 'still requires a tenant for device code sign-in' {
+        $threw = $false
+        try { Get-InventoryCredential -AuthMode 'DeviceCode' -EnvironmentFilePath (Join-Path $TestDrive 'absent.env') }
+        catch { $threw = $true }
+        if (-not $threw) { throw 'Device code mode should require a tenant ID.' }
+    }
+}
