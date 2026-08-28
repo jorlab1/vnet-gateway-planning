@@ -6,6 +6,24 @@ VNet gateway planning is a **separate, legacy workflow** in this repository. See
 
 Licensed under the [MIT License](LICENSE).
 
+## Quick start
+
+1. Authorize a service principal for the read-only admin APIs — see [Service principal setup](#service-principal-setup). This is a one-time tenant admin task.
+2. Make the tenant ID, client ID, and secret available — see [Credentials](#credentials).
+3. Confirm access:
+
+   ```powershell
+   pwsh .\scripts\Invoke-FabricTenantInventory.ps1 -TestConnectionOnly
+   ```
+
+4. Retrieve the inventory:
+
+   ```powershell
+   pwsh .\scripts\Invoke-FabricTenantInventory.ps1
+   ```
+
+The CSV is written to `output\powerbi-inventory.csv` and its full path is printed at the end of the run. Use `-OutputPath` to send it elsewhere. The `output` folder is gitignored.
+
 ## What the inventory produces
 
 One CSV, by default `output\powerbi-inventory.csv`, with exactly these columns:
@@ -13,6 +31,14 @@ One CSV, by default `output\powerbi-inventory.csv`, with exactly these columns:
 ```text
 CapacityName,CapacityId,WorkspaceName,WorkspaceId,SemanticModelName,SemanticModelCreatedAt,TargetStorageMode
 ```
+
+Sample row:
+
+```text
+"democapacityjll","3A04A993-AE9B-4DBE-93F1-191DB1938F9C","FUAM","57181d13-f557-40b2-9d76-9e5a5ddd08fd","FUAM_Core_SM","2026-08-14T19:41:37.0000000Z","Abf"
+```
+
+Rows are sorted by capacity name, then workspace name, then model name, so two runs over an unchanged tenant produce identical files.
 
 Behavior:
 
@@ -90,7 +116,6 @@ The secret is only ever sent in the encoded token request body. It is never logg
 ## Run
 
 Verify access without scanning anything:
-
 ```powershell
 pwsh .\scripts\Invoke-FabricTenantInventory.ps1 -TestConnectionOnly
 ```
